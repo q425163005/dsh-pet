@@ -9,7 +9,8 @@ import { flattenPetList, readAllConfig } from '../config.ts';
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { PACKAGE_ROOT } from '../paths.ts';
-import { queryBalance } from '../balance/index.ts';
+import { queryBalance, queryBalanceSource } from '../balance/index.ts';
+import type { BalanceSourceConfig } from '../balance/index.ts';
 import { credentialRef } from '@deepseek-ai/dsh-credentials';
 import type { ChatMemory } from './chat-memory.ts';
 import type { HostSetup } from './setup.ts';
@@ -38,6 +39,33 @@ export function createBalancePoll(deps: BalancePollInput) {
     const ers = cfg.main?.eventsRefreshSec as Record<string, unknown> | undefined;
     const n = Number(ers?.balance);
     return Number.isFinite(n) && n > 0 ? n : 1800;
+  };
+
+  /**
+   * 配置声明的自建余额源（main 条目顶层 balanceSource）：只有配置就位才返回声明。
+   *
+   * 四个字段必须齐备——半截配置在校验层已被判非法并回退默认，这里再判一次是因为
+   * 空串是「不启用」的合法形态，不能把 provider 留空误当成「命中一切」。
+   *
+   * 读配置失败一律当作「没有配置」：这条读路径与原来的余额查询相比是新增的，
+   * 它失败绝不能把「该服务商不支持余额」变成「查询出错」——那是两种完全不同的告警。
+   */
+  const balanceSource = (): BalanceSourceConfig | undefined => {
+    let raw: unknown;
+    try {
+      raw = readAllConfig(configPaths).main?.balanceSource;
+    } catch {
+      return undefined;
+    }
+    if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return undefined;
+    const s = raw as Record<string, unknown>;
+    const text = (key: string): string => (typeof s[key] === 'string' ? String(s[key]).trim() : '');
+    const provider = text('provider');
+    const kind = text('kind');
+    const baseUrl = text('baseUrl');
+    const credential = text('credential');
+    if (provider === '' || kind === '' || baseUrl === '' || credential === '') return undefined;
+    return { provider, kind, baseUrl, credential };
   };
 
   /** 碎碎念周期（秒）：该宠物所属条目的 eventsRefreshSec.whisper（合并器已填默认；非法兜底 300）。
@@ -80,22 +108,26 @@ export function createBalancePoll(deps: BalancePollInput) {
       // 也不能经 DSH 的 credential store 解析，所以优先走 standaloneAi 交出来的凭证。
       const standalone = standaloneAiBalance();
       const provider = standalone?.provider || ctx.agentDefaultModel.currentSelection().provider;
-      const result = await queryBalance(
-        provider,
-        async (ref) => {
-          if (standalone?.apiKey) return standalone.apiKey;
-          const rc = await ctx.credentials.resolve(credentialRef(ref));
-          return rc?.value;
-        },
-        // `deepseek-account`（免费额度 / 平台登录）没有 API Key：它的凭证是 DSH 账号服务
-        // 持有的授权记录，只能经 getBalance 查询。账号服务是可选服务（软取，不放进 inject）
-        // ——没装账号插件时它不在场，此时该路由报 credential-missing 而不是崩。
-        async () => {
-          const account = ctx.get('deepseekAccount', false);
-          if (!account) return undefined;
-          return account.getBalance(accountClientMetadata());
-        },
-      );
+      // 凭证解析两条路径共用：内置路由按定义里的 ref 名取，自建余额源按配置里的 credential 取。
+      const resolveKey = async (ref: string): Promise<string | undefined> => {
+        if (standalone?.apiKey) return standalone.apiKey;
+        const rc = await ctx.credentials.resolve(credentialRef(ref));
+        return rc?.value;
+      };
+      // 自建网关改道：只有当前 provider 与配置里声明的那个**完全一致**才走配置的地址，
+      // 否则照旧查编译期名录——不会因为「配了余额源」就让别的服务商也去问那台网关。
+      const source = balanceSource();
+      // `deepseek-account`（免费额度 / 平台登录）没有 API Key：它的凭证是 DSH 账号服务持有的授权记录，
+      // 只能经 getBalance 查询。账号服务是可选服务（软取，不放进 inject）——没装账号插件时它不在场，
+      // 此时该路由报 credential-missing 而不是崩。
+      const result =
+        source && source.provider === provider
+          ? await queryBalanceSource(source, resolveKey)
+          : await queryBalance(provider, resolveKey, async () => {
+              const account = ctx.get('deepseekAccount', false);
+              if (!account) return undefined;
+              return account.getBalance(accountClientMetadata());
+            });
       state.writeSection('balance', mark(result));
       // 失败也写 S（前端弹文字说明），日志同样留一条：否则「查了、失败了」与「根本没查」
       // 在文件里长得一模一样。成功用 info，失败用 warn（亮度不同，扫一眼就能分辨）。

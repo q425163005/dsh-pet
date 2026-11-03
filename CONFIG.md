@@ -49,9 +49,34 @@ DSH 设置 → 「桌宠配置」：
 | `sleepEndTexts`        | **醒来台词**（条目级，随机挑一句；播「起来」时弹气泡）                                                         | 非空字符串数组             |
 | `sleepRefuseTexts`     | **睡着被打扰时的拒绝台词**（条目级，随机挑一句）                                                               | 非空字符串数组             |
 | `notificationsEnabled` | 系统通知总开关（布尔）                                                                                         | 同 `notificationsEnabled`  |
+| `balanceSource`        | **自建余额源**（只读 main）：把 DSH 里的某个 provider 绑到自建网关的积分接口，见下方「自建余额源」              | 同 `balanceSource` 结构    |
 | `chatAnimationEnabled` | **对话动作联动**：开启后对话时把 `animations.categories` 下的动作清单交给模型，由它按语境挑一个当场表演（布尔，默认 true） | 布尔，默认即可             |
 
 > 覆盖语义：用户层给出即**整体替换**该字段（如写了 `animations` 就用你的整份动画池，替代默认），没写的字段回落包内默认。校验在插件加载时执行——格式错误会在 DSH 控制台显式报错，不会静默运行残缺配置。
+
+### 自建余额源（`balanceSource`）
+
+跑在自己机器 / NAS 上的网关（例如 [WorkBuddy2API-Hub](https://github.com/ardeyouxipianyi/workbuddy2api-hub)）没有公开的行业接口，地址也只有你知道；而 DSH 里这类自定义端点通常都被登记成 provider `custom`——`custom` 是**通用槽位**，任何自定义端点都叫这个名字，所以插件没法按 id 认出「这是那台网关」。这一节就是把这个对应关系写下来：
+
+```jsonc
+// $DSH_HOME/dsh-pet/main-config.jsonc（只写这一节即可，其余字段回落默认）
+{
+  "balanceSource": {
+    "provider": "custom",                                 // 命中哪个 DSH provider（见下）
+    "kind": "workbuddy2api",                              // 取数协议，目前只有这一个
+    "baseUrl": "https://nas.example.com:8788",            // 网关根地址；写成 .../v1 也认
+    "credential": "CUSTOM_API_KEY"                        // DSH 凭证名（网关看板里那枚 API Key）
+  }
+}
+```
+
+- **`provider` 从哪来**：桌面端看 `~/.dsh/profiles/<profile>/cordis.patch.yml` 里 `llm-pi-ai.providers` 下面的键名（自建网关常见就是 `custom`）。只有当前对话用的 provider 与它**完全一致**时才会走这条配置，配错了不会误伤别的服务商。
+- **`credential` 从哪来**：就是你配置这个 provider 时用的那个 API Key 的环境变量名 / 凭证名（`apiKeyEnv`），插件经 DSH 的凭证存储解析，不自己存密钥。
+- **`kind`**：`workbuddy2api` 对应网关的 `GET /v1/balance-summary`（只读缓存快照，不触发上游刷新，适合按 `eventsRefreshSec.balance` 周期轮询）。
+- **数据口径**：网关把它**所有启用账号**的剩余积分求和后给出，所以看到的是账号池总量，不是单个账号。
+- **展示**：只弹「余额 N 积分」文字气泡。积分没有「满额」概念，这里不提供档位基准，因此**不播**余额档位动画（钱袋满溢→分文不剩那套）——那套动画需要「已用百分比」，留给有月度额度的服务商。
+- **失败都能看见**：网关还没有任何账号的积分快照时（`balance: null`）弹「暂无积分快照」，而不是显示 0；凭证无效、隧道断开同样弹文字说明，日志里按 `credential-missing` / `fetch-error` 分开记。
+- **换地址**：隧道域名（如 trycloudflare 的临时地址）每次重启都会变，那行 `baseUrl` 要同步改——和模型那边 `cordis.patch.yml` 里的 `baseURL` 是同一件事，改两处。
 
 ## 方式四：额外宠物（pet pack）——添加新「种类」
 

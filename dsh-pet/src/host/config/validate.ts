@@ -147,6 +147,40 @@ function workStatusTextsValid(value: unknown): boolean {
   return true;
 }
 
+/** 余额源地址必须是 http/https 绝对地址：凭证与积分都从它出去，file:// 之类一律不认 */
+function isHttpEndpoint(text: string): boolean {
+  let url: URL;
+  try {
+    url = new URL(text);
+  } catch {
+    return false;
+  }
+  return url.protocol === 'http:' || url.protocol === 'https:';
+}
+
+/**
+ * balanceSource 段校验：`{ provider, kind, baseUrl, credential }` 四个字符串。
+ *
+ * 整段留空（provider 为空）= 不启用，此时其余字段写不写都行——默认配置就是这个形态。
+ * 一旦写了 provider，其余三件必须齐备：地址缺失会拼出 `undefined/v1/...`，
+ * 凭证缺失会让「查询失败」与「根本没配」在日志里长得一模一样。
+ * 半截配置按非法处理（告警 + 取默认），不给「猜一个」的机会。
+ */
+export function balanceSourceValid(value: unknown): boolean {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return false;
+  const s = value as Record<string, unknown>;
+  const text = (key: string): string => (typeof s[key] === 'string' ? String(s[key]).trim() : '');
+  for (const key of ['provider', 'kind', 'baseUrl', 'credential']) {
+    const raw = s[key];
+    if (raw !== undefined && typeof raw !== 'string') return false;
+  }
+  if (text('provider') === '') return true;
+  for (const key of ['kind', 'baseUrl', 'credential']) {
+    if (text(key) === '') return false;
+  }
+  return isHttpEndpoint(text('baseUrl'));
+}
+
 /** 顶层标量字段的合法性（非法与缺失同处理：取默认值 + 告警） */
 export function topFieldValid(key: string, value: unknown): boolean {
   switch (key) {
@@ -205,6 +239,8 @@ export function topFieldValid(key: string, value: unknown): boolean {
     case 'whisperModel':
     case 'chatModel':
       return modelSelectionValid(value);
+    case 'balanceSource':
+      return balanceSourceValid(value);
     case 'workStatusTexts':
       return workStatusTextsValid(value);
     case 'sleepRefuseTexts':

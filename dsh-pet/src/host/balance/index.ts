@@ -8,6 +8,7 @@
  *
  * @module dsh-pet/src/host/balance/index
  */
+import { fetchBalanceSummary, WORKBUDDY_KIND } from './providers/workbuddy2api.ts';
 import { BUILTIN_PROVIDERS, matchBalanceProvider } from './registry.ts';
 import type { AccountBalanceSnapshot, BalanceResult } from './types.ts';
 
@@ -86,9 +87,53 @@ export async function queryBalance(
   }
 }
 
+/**
+ * 配置声明的第三方余额源：把某个 DSH provider id 绑到一套内置取数协议上。
+ *
+ * 为什么需要它：自建网关（NAS / 隧道）既不该把地址写进仓库常量，也不该占用一个全局
+ * provider id —— DSH 里这类自定义端点一律叫 `custom`，认 id 就等于把所有自定义端点都
+ * 认成同一家。于是「命中谁、查哪里、用哪份凭证、按哪套协议取数」全部由用户配置决定。
+ */
+export interface BalanceSourceConfig {
+  /** 命中的 DSH provider id（agentDefaultModel 报告的那个）。 */
+  provider: string;
+  /** 取数协议，见 PROVIDERS 实现的 kind（目前只有 workbuddy2api）。 */
+  kind: string;
+  /** 服务根地址（http/https 绝对地址）。 */
+  baseUrl: string;
+  /** DSH credentialRef 名，由调用方解析成 key。 */
+  credential: string;
+}
+
+/**
+ * 按配置声明的余额源取数。
+ *
+ * 与 queryBalance 的关系：两者产出同一种 BalanceResult，展示层分不出差别；区别只在
+ * 「谁是服务商」——那边按 id 查编译期名录与凭证规格，这边按配置拿地址与凭证名。
+ * 始终成立：任何失败都落成 unsupported / credential-missing / fetch-error，绝不伪造数字。
+ *
+ * @param source - 已通过配置校验的余额源声明
+ * @param resolveKey - 凭证解析：ref 名 → key
+ * @returns 成功，或带 reason 的失败
+ */
+export async function queryBalanceSource(
+  source: BalanceSourceConfig,
+  resolveKey: (ref: string) => Promise<string | undefined>,
+): Promise<BalanceResult> {
+  if (source.kind !== WORKBUDDY_KIND) return failed(source.provider, 'unsupported', '未知的余额源类型：' + source.kind);
+  const key = await resolveKey(source.credential);
+  if (!key) return failed(source.provider, 'credential-missing', '缺少凭证 ' + source.credential);
+  try {
+    return await fetchBalanceSummary(source.baseUrl, key, source.provider);
+  } catch (e) {
+    return fetchFailed(source.provider, e);
+  }
+}
+
 /** 对外再导出：调用方（宿主与测试）只需认这一个入口。 */
 export { parseAccountBalance } from './providers/deepseek-account.ts';
 export { parseCommandCode } from './providers/commandcode.ts';
+export { parseBalanceSummary, summaryUrl, WORKBUDDY_KIND } from './providers/workbuddy2api.ts';
 export type {
   AccountBalanceSnapshot,
   BalanceFetchContext,

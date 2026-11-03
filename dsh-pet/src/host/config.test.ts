@@ -71,6 +71,8 @@ const BASE = {
   notificationsEnabled: true,
   eventsRefreshSec: { balance: 1800, whisper: 300 },
   workStatusTexts: [['在干活']],
+  // 自建余额源：默认四项全空 = 不启用（与 assets/config.jsonc 的默认形态一致）
+  balanceSource: { provider: '', kind: '', baseUrl: '', credential: '' },
 };
 
 /** 与 BASE.animations 同构、仅替换 events 的用户层 animations（顶层字段整段替换，故必须完整） */
@@ -1469,5 +1471,79 @@ describe('removeRoundsByTs —— 按轮删除（一轮两条共享 ts，成对�
     const r = removeRoundsByTs(msgs, [1000, 2000]);
     assert.deepEqual(r.messages, []);
     assert.equal(r.removed, 4);
+  });
+});
+
+describe('readAllConfig —— balanceSource 段校验（自建余额源）', () => {
+  /** 默认形态：不启用 */
+  const OFF = { provider: '', kind: '', baseUrl: '', credential: '' };
+
+  /** 跑一次完整合并（内置默认 + 用户层），返回成品里的 balanceSource */
+  function mergedBalanceSource(overlay: Record<string, unknown>): unknown {
+    const dir = mkdtempSync(join(tmpdir(), 'dsh-pet-config-test-'));
+    try {
+      const paths: ConfigPaths = {
+        defaultFile: join(dir, 'default.jsonc'),
+        userFile: join(dir, 'main-config.jsonc'),
+        petDir: join(dir, 'pet'), // 不存在 = 无文件宠物
+      };
+      writeFileSync(paths.defaultFile, JSON.stringify(BASE));
+      writeFileSync(paths.userFile, JSON.stringify(overlay));
+      return readAllConfig(paths).main.balanceSource;
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  }
+
+  /** 一个合法条目，逐字段覆盖用 */
+  const FULL = {
+    provider: 'custom',
+    kind: 'workbuddy2api',
+    baseUrl: 'https://nas.example.test:8788',
+    credential: 'CUSTOM_API_KEY',
+  };
+
+  test('用户层没写 → 保持默认（不启用）', () => {
+    assert.deepEqual(mergedBalanceSource({}), OFF);
+  });
+
+  test('四件齐备 → 原样保留', () => {
+    assert.deepEqual(mergedBalanceSource({ balanceSource: FULL }), FULL);
+  });
+
+  test('http 与带端口的局域网地址都合法', () => {
+    const lan = { ...FULL, baseUrl: 'http://192.168.1.10:8788' };
+    assert.deepEqual(mergedBalanceSource({ balanceSource: lan }), lan);
+  });
+
+  test('只写 provider 的半截配置非法 → 回退默认', () => {
+    assert.deepEqual(mergedBalanceSource({ balanceSource: { provider: 'custom' } }), OFF);
+  });
+
+  test('缺凭证非法 → 回退默认（否则「查询失败」与「根本没配」分不清）', () => {
+    const { credential, ...withoutCredential } = FULL;
+    assert.equal(credential.length > 0, true); // 校验用例本身的前提
+    assert.deepEqual(mergedBalanceSource({ balanceSource: withoutCredential }), OFF);
+  });
+
+  test('baseUrl 不是 http/https 非法 → 回退默认', () => {
+    for (const baseUrl of ['file:///c:/x', 'nas.example.test:8788', 'ftp://nas/x', '']) {
+      assert.deepEqual(mergedBalanceSource({ balanceSource: { ...FULL, baseUrl } }), OFF, baseUrl);
+    }
+  });
+
+  test('字段类型不对非法 → 回退默认', () => {
+    assert.deepEqual(mergedBalanceSource({ balanceSource: { ...FULL, provider: 1 } }), OFF);
+    assert.deepEqual(mergedBalanceSource({ balanceSource: { ...FULL, credential: null } }), OFF);
+  });
+
+  test('整段写成字符串/数组非法 → 回退默认', () => {
+    assert.deepEqual(mergedBalanceSource({ balanceSource: 'custom' }), OFF);
+    assert.deepEqual(mergedBalanceSource({ balanceSource: [FULL] }), OFF);
+  });
+
+  test('provider 留空时其余字段写不写都合法（空 provider 就是「不启用」）', () => {
+    const partial = { provider: '', kind: 'workbuddy2api', baseUrl: 'nonsense', credential: '' };
+    assert.deepEqual(mergedBalanceSource({ balanceSource: partial }), partial);
   });
 });
